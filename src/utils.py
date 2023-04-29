@@ -1,7 +1,18 @@
 from scipy.io.wavfile import read, write
 from scipy.fft import rfft, irfft
 import numpy as np
+import scipy.signal as signal
 
+
+def resample(y, fs_old, fs_new):
+    T = y.shape[-1] / fs_old
+    N_new = int(T * fs_new)
+    return signal.resample(y, N_new)
+
+def quantize_8bit(x: np.ndarray) -> np.ndarray:
+    low, high = x.min(), x.max()
+    x = 255 * (x - low) / (high - low)
+    return x.astype(np.uint8)
 
 def bpf(x, fl, fh, fs):
     """
@@ -11,9 +22,9 @@ def bpf(x, fl, fh, fs):
     X = rfft(x)
 
     # Should these be divided by 2?
-    F_L = n * fl // fs
-    F_H = 1 + (n * fh - 1) // fs
-
+    F_L = int(n * fl // fs)
+    F_H = int(1 + (n * fh - 1) // fs)
+    
     X[:F_L] = 0
     X[F_H:] = 0
     
@@ -34,8 +45,35 @@ def demodulate_am(x, fc, fs):
     y = x * carrier
     
     # Cancel 2fc oscillations with lowpass @ fc
-    return bpf(y, 0, fc, fs) * 2
+    return bpf(y, 10, fc, fs)
+    # return y
 
+def get_envelope(y_filt):
+    return np.abs(signal.hilbert(y_filt))
+
+def decode_apt(x_line: np.ndarray) -> np.ndarray:
+    assert x_line.shape == (2080)
+    # Define lengths
+    sync_a_length = 39
+    space_a_length = 47
+    image_a_length = 909
+    telemetry_a_length = 45
+    
+    sync_b_length = 39
+    space_b_length = 47
+    image_b_length = 909
+    telemetry_b_length = 45
+
+    # Define order
+    sync_a_idx = 0
+    space_a_idx = sync_a_idx + sync_a_length
+    image_a_idx = space_a_idx + space_a_length
+    telemetry_a_idx = image_a_idx + image_a_length
+
+    sync_b_idx = telemetry_a_idx + telemetry_a_length
+    space_b_idx = sync_b_idx + sync_b_length
+    image_b_idx = space_b_idx + space_b_length
+    telemetry_b_idx = image_b_idx + image_b_length
 
 def read_wavfile(path: str):
     """
