@@ -9,7 +9,7 @@ import cv2
 
 
 
-CC_THRESHOLD = 0.5
+CC_THRESHOLD = 0.3
 
 
 def sync_a(fs):
