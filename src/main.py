@@ -6,10 +6,13 @@ import scipy.signal as signal
 from scipy.fftpack import rfft, irfft
 import argparse
 import cv2
+from scipy.ndimage import gaussian_filter1d
 
 
-
+SYNC_AB_MAX_DRIFT_PER_FRAME = 5
+START_FRAME_CC_THRESHOLD = 0.3
 CC_THRESHOLD = 0.3
+CC_THRESHOLD_NEW = 0.1
 
 
 def sync_a(fs):
@@ -26,6 +29,40 @@ def sync_b(fs):
 
     return square(2 * np.pi * f_b * t_b, duty=0.5)
 
+def cross_correlate_and_order(sig, sync_signal):
+    xcorr = signal.correlate(sig, sync_signal)
+
+    mid = len(xcorr)//2 + 1
+
+    cc = np.concatenate((xcorr[-mid:], xcorr[:mid]))
+    return np.abs(cc[mid+(sync_signal.shape[0]-1):])
+
+def sync_found(x, fs, samples_per_line, debug=False):
+    offset = samples_per_line//2
+
+    sa = sync_a(fs)
+    sb = sync_b(fs)
+
+    x = x > (x.max()/2)
+
+    cc_a = cross_correlate_and_order(x, sa)
+    cc_b = cross_correlate_and_order(x[offset:], sb)
+    
+    cc_a = cc_a[..., :cc_b.shape[-1]]
+    cc = cc_a + cc_b
+
+    if debug:
+        t = np.arange(0, len(cc_a)/fs, 1/fs)
+        plt.plot(t, cc_a)
+        plt.plot(t, cc_b)
+        plt.show()
+
+    tau = np.argmax(cc)
+
+    cc_threshold = (np.sum(sa == 1) + np.sum(sb == 1)) * START_FRAME_CC_THRESHOLD
+    
+    return tau, cc[tau] > cc_threshold
+
 def find_sync_time(x, fs, samples_per_line):
     offset = samples_per_line//2
 
@@ -33,30 +70,29 @@ def find_sync_time(x, fs, samples_per_line):
     sb = sync_b(fs)
 
     x = x > (x.max()/2)
-    corr_a = signal.correlate(x, sa)
-    corr_b = signal.correlate(x[offset:], sb)
 
-    def process(xcorr):
-        mid = len(xcorr)//2 + 1
-
-        cc = np.concatenate((xcorr[-mid:], xcorr[:mid]))
-        return cc, mid
-
-    cc_a, mid_a = process(corr_a)
-    cc_b, mid_b = process(corr_b)
-
-    cc_a = np.abs(cc_a)[mid_a:]
-    cc_b = np.abs(cc_b)[mid_b:]
-    cc_a = cc_b[..., :cc_b.shape[-1]]
+    cc_a = cross_correlate_and_order(x, sa)
+    cc_b = cross_correlate_and_order(x[offset:], sb)
+    
+    cc_a = cc_a[..., :cc_b.shape[-1]]
     cc = cc_a + cc_b
 
-    # t1 = np.arange(0, len(cc_a)/fs, 1/fs)
+    cc_a_inv = cross_correlate_and_order(x[offset:], sa)
+    cc_b_inv = cross_correlate_and_order(x, sb)
+    
+    cc_b_inv = cc_b_inv[..., :cc_a_inv.shape[-1]]
+    cc_inv = cc_a_inv + cc_b_inv
 
-    # plt.plot(t1, cc)
-    # # plt.plot(t1, cc_a)
-    # # t2 = np.arange(0, len(cc_b)/fs, 1/fs)
-    # # plt.plot(t2, cc_b)
-    # # plt.scatter(t[tau], cc_a[tau], c='green', marker='o')
+    add_offset = 0
+
+    if np.max(cc_inv) > np.max(cc):
+        cc = cc_inv
+        add_offset = offset
+
+    # t = np.arange(0, len(cc_a)/fs, 1/fs)
+    # plt.plot(t, cc_a)
+    # plt.plot(t, cc_b)
+    # plt.plot(t, cc)
     # plt.show()
 
     tau = np.argmax(cc)
@@ -68,16 +104,10 @@ def find_sync_time(x, fs, samples_per_line):
     else:
         success = False
 
-    # peaks, props = signal.find_peaks(cc, distance=5000)
-    # t = np.arange(0, len(cc)/fs, 1/fs)
-    # plt.plot(t, cc)
-    # plt.scatter(t[tau], cc[tau], c='green', marker='o')
-    # plt.show()
-
-    return tau, success
+    return tau + add_offset, success
 
 def main():
-    fs, y = utils.read_wavfile('data/demo.wav')
+    fs, y = utils.read_wavfile('data/fountain_noaa19_apr19_9_40.wav')
 
     pixels_per_line = 2080
     if y.dtype == np.int16:
@@ -87,29 +117,55 @@ def main():
     if len(y.shape) == 2:
         y = y[:, 0]
 
-    new_fs = ((fs - 1) // pixels_per_line + 1) * pixels_per_line
-    y = utils.resample(y, fs, new_fs)
-    fs = new_fs
+    if (fs % pixels_per_line) > 0:
+        print("Sampling rate incompatible, resampling...")
+        new_fs = ((fs - 1) // pixels_per_line + 1) * pixels_per_line
+        y = utils.resample(y, fs, new_fs)
+        fs = new_fs
+        print("Done")
 
     samples_per_line = fs//2
-    samples_backoff = samples_per_line//4
+    samples_backoff = samples_per_line //4
     samples_per_pixel = samples_per_line//pixels_per_line
 
+    print("Computing envelope...")
     y_envelope = utils.get_envelope(y)
+    print("Done")
+
+    current_index = 0
 
     print("Finding first frame")
     success = False
-    while not success and (len(y_envelope) > samples_per_line):
-        tau, success = find_sync_time(y_envelope[:3*samples_per_line//2], fs, samples_per_line)
-        y_envelope = y_envelope[samples_per_line:]
+    while (current_index + 3 * samples_per_line // 2 < len(y_envelope)):
+        update, success = \
+            sync_found(y_envelope[current_index:current_index + 3*samples_per_line//2],
+                       fs,
+                       samples_per_line)
+        if not success:
+            current_index += samples_per_line
+        else:
+            # sync_found(y_envelope[current_index:current_index + 3*samples_per_line//2],
+            #     fs,
+            #     samples_per_line, debug=True)
+            current_index += update
+            break
+    
+    if success is False:
+        print("Could not find a frame. Recording may be too noisy, quitting...")
+    
+    print("Done")
 
-    print("First frame found!")
-    current_index = tau
+    utils.write_wavfile('output/syncd.wav', y_envelope[current_index:current_index+samples_per_line], fs)
+
+    # test = y_envelope[current_index:current_index + samples_per_line]
+    # plt.plot(test/test.max())
+    # plt.show()
+    # quit()
+    
     image = []
     while y_envelope.shape[-1] - current_index > 2 * samples_per_line:
         sync_start_index = max([current_index - samples_backoff, 0])
-
-        tau, success = find_sync_time(y_envelope[sync_start_index:sync_start_index + 3*samples_per_line//2], fs, samples_per_line)
+        tau, success = find_sync_time(y_envelope[sync_start_index:sync_start_index + 3 * samples_per_line//2], fs, samples_per_line)
         if success:
             current_index = sync_start_index + tau
 
@@ -117,20 +173,16 @@ def main():
             break
 
         y_line = y_envelope[current_index:current_index+samples_per_line]
+        current_index += samples_per_line 
+
         y_line = y_line.reshape(pixels_per_line, samples_per_pixel)
-        y_line = np.median(y_line, axis=1)
+        y_line = np.mean(y_line, axis=1)
         image.append(y_line)
 
-        current_index += samples_per_line
-
-    # y_dem = y_dem[pixels_per_line:]
     image = np.array(image)
     image = utils.quantize_8bit(image)
     equ = cv2.equalizeHist(image)
-    # cv2.imwrite('output.png', equ)
-    # plt.hist(image)
 
-    # plt.plot(y_dem)
     plt.imshow(equ, cmap='gray', vmin=0, vmax=255)
     plt.show()
 
