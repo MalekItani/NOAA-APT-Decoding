@@ -11,11 +11,6 @@ import glob
 from scipy.ndimage import gaussian_filter1d
 import librosa
 
-
-
-
-
-
 SYNC_AB_MAX_DRIFT_PER_FRAME = 5
 START_FRAME_CC_THRESHOLD = 0.25
 CC_THRESHOLD = 0.3
@@ -186,7 +181,7 @@ def noaa_decoder(path):
         image.append(y_line)
     if len(image) == 0:
         return None
-    
+
     image = np.array(image)
     image = utils.quantize_8bit(image)
     equ = cv2.equalizeHist(image)
@@ -194,7 +189,6 @@ def noaa_decoder(path):
     return equ
 
 def main(args):
-    # target_dir = Path(args.path)
 
     if not os.path.exists(args.path):
         print("The target directory doesn't exist")
@@ -206,7 +200,6 @@ def main(args):
         # plt.imshow(decoded_image, cmap='gray', vmin=0, vmax=255)
         path = os.path.join('output', f'{os.path.basename(entry)[:-4]}.png')
         cv2.imwrite(path, decoded_image)
-        # cv2.imwrite('output.png', decoded_image)
         print('Image exported to: ' + path)
         print()
         plt.show()
