@@ -47,7 +47,7 @@ def sync_found(x, fs, samples_per_line, debug=False):
 
     cc_a = cross_correlate_and_order(x, sa)
     cc_b = cross_correlate_and_order(x[offset:], sb)
-    
+
     cc_a = cc_a[..., :cc_b.shape[-1]]
     cc = cc_a + cc_b
 
@@ -60,7 +60,7 @@ def sync_found(x, fs, samples_per_line, debug=False):
     tau = np.argmax(cc)
 
     cc_threshold = (np.sum(sa == 1) + np.sum(sb == 1)) * START_FRAME_CC_THRESHOLD
-    
+
     return tau, cc[tau] > cc_threshold
 
 def find_sync_time(x, fs, samples_per_line):
@@ -73,13 +73,13 @@ def find_sync_time(x, fs, samples_per_line):
 
     cc_a = cross_correlate_and_order(x, sa)
     cc_b = cross_correlate_and_order(x[offset:], sb)
-    
+
     cc_a = cc_a[..., :cc_b.shape[-1]]
     cc = cc_a + cc_b
 
     cc_a_inv = cross_correlate_and_order(x[offset:], sa)
     cc_b_inv = cross_correlate_and_order(x, sb)
-    
+
     cc_b_inv = cc_b_inv[..., :cc_a_inv.shape[-1]]
     cc_inv = cc_a_inv + cc_b_inv
 
@@ -106,8 +106,8 @@ def find_sync_time(x, fs, samples_per_line):
 
     return tau + add_offset, success
 
-def main():
-    fs, y = utils.read_wavfile('data/fountain_noaa19_apr19_9_40.wav')
+def noaa_decoder(path):
+    fs, y = utils.read_wavfile(path)
 
     pixels_per_line = 2080
     if y.dtype == np.int16:
@@ -139,8 +139,8 @@ def main():
     while (current_index + 3 * samples_per_line // 2 < len(y_envelope)):
         update, success = \
             sync_found(y_envelope[current_index:current_index + 3*samples_per_line//2],
-                       fs,
-                       samples_per_line)
+                    fs,
+                    samples_per_line)
         if not success:
             current_index += samples_per_line
         else:
@@ -149,10 +149,10 @@ def main():
             #     samples_per_line, debug=True)
             current_index += update
             break
-    
+
     if success is False:
         print("Could not find a frame. Recording may be too noisy, quitting...")
-    
+
     print("Done")
 
     utils.write_wavfile('output/syncd.wav', y_envelope[current_index:current_index+samples_per_line], fs)
@@ -161,7 +161,7 @@ def main():
     # plt.plot(test/test.max())
     # plt.show()
     # quit()
-    
+
     image = []
     while y_envelope.shape[-1] - current_index > 2 * samples_per_line:
         sync_start_index = max([current_index - samples_backoff, 0])
@@ -173,7 +173,7 @@ def main():
             break
 
         y_line = y_envelope[current_index:current_index+samples_per_line]
-        current_index += samples_per_line 
+        current_index += samples_per_line
 
         y_line = y_line.reshape(pixels_per_line, samples_per_pixel)
         y_line = np.mean(y_line, axis=1)
@@ -183,7 +183,13 @@ def main():
     image = utils.quantize_8bit(image)
     equ = cv2.equalizeHist(image)
 
-    plt.imshow(equ, cmap='gray', vmin=0, vmax=255)
+    return equ
+
+def main():
+    path = 'noaa.wav'
+    decoded_image = noaa_decoder(path)
+
+    plt.imshow(decoded_image, cmap='gray', vmin=0, vmax=255)
     plt.show()
 
 if __name__ == "__main__":
