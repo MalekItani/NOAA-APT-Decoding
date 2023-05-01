@@ -6,7 +6,13 @@ import scipy.signal as signal
 from scipy.fftpack import rfft, irfft
 import argparse
 import cv2
+import os
+import glob
 from scipy.ndimage import gaussian_filter1d
+
+
+
+
 
 
 SYNC_AB_MAX_DRIFT_PER_FRAME = 5
@@ -155,8 +161,7 @@ def noaa_decoder(path):
 
     print("Done")
 
-    utils.write_wavfile('output/syncd.wav', y_envelope[current_index:current_index+samples_per_line], fs)
-
+    # utils.write_wavfile('output/syncd.wav', y_envelope[current_index:current_index+samples_per_line], fs)
     # test = y_envelope[current_index:current_index + samples_per_line]
     # plt.plot(test/test.max())
     # plt.show()
@@ -185,12 +190,26 @@ def noaa_decoder(path):
 
     return equ
 
-def main():
-    path = 'noaa.wav'
-    decoded_image = noaa_decoder(path)
+def main(args):
+    # target_dir = Path(args.path)
 
-    plt.imshow(decoded_image, cmap='gray', vmin=0, vmax=255)
-    plt.show()
+    if not os.path.exists(args.path):
+        print("The target directory doesn't exist")
+        raise SystemExit(1)
+
+    for entry in glob.glob(os.path.join(args.path, '*')):
+        print(entry)
+        decoded_image = noaa_decoder(entry)
+        # plt.imshow(decoded_image, cmap='gray', vmin=0, vmax=255)
+        path = os.path.join('output', f'{os.path.basename(entry)[:-4]}.png')
+        cv2.imwrite(path, decoded_image)
+        # cv2.imwrite('output.png', decoded_image)
+        print('Image exported to: ' + path)
+        print()
+        plt.show()
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("path")
+    args = parser.parse_args()
+    main(args)
