@@ -17,7 +17,7 @@ import librosa
 
 
 SYNC_AB_MAX_DRIFT_PER_FRAME = 5
-START_FRAME_CC_THRESHOLD = 0.3
+START_FRAME_CC_THRESHOLD = 0.25
 CC_THRESHOLD = 0.3
 CC_THRESHOLD_NEW = 0.1
 
@@ -118,8 +118,7 @@ def noaa_decoder(path):
 
     pixels_per_line = 2080
     if y.dtype == np.int16:
-        y = y / (2 ** 15 - 1)
-        assert np.abs(y).max() < 1
+        y = y / (2 ** 15)
 
     if len(y.shape) == 2:
         y = y[:, 0]
@@ -159,6 +158,7 @@ def noaa_decoder(path):
 
     if success is False:
         print("Could not find a frame. Recording may be too noisy, quitting...")
+        return None
 
     print("Done")
 
@@ -169,7 +169,7 @@ def noaa_decoder(path):
     # quit()
 
     image = []
-    while y_envelope.shape[-1] - current_index > 2 * samples_per_line:
+    while y_envelope.shape[-1] - current_index > 3 * samples_per_line//2:
         sync_start_index = max([current_index - samples_backoff, 0])
         tau, success = find_sync_time(y_envelope[sync_start_index:sync_start_index + 3 * samples_per_line//2], fs, samples_per_line)
         if success:
@@ -184,7 +184,9 @@ def noaa_decoder(path):
         y_line = y_line.reshape(pixels_per_line, samples_per_pixel)
         y_line = np.mean(y_line, axis=1)
         image.append(y_line)
-
+    if len(image) == 0:
+        return None
+    
     image = np.array(image)
     image = utils.quantize_8bit(image)
     equ = cv2.equalizeHist(image)
