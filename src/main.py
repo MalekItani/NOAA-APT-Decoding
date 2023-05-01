@@ -9,6 +9,7 @@ import cv2
 import os
 import glob
 from scipy.ndimage import gaussian_filter1d
+import librosa
 
 
 
@@ -125,8 +126,9 @@ def noaa_decoder(path):
 
     if (fs % pixels_per_line) > 0:
         print("Sampling rate incompatible, resampling...")
-        new_fs = ((fs - 1) // pixels_per_line + 1) * pixels_per_line
-        y = utils.resample(y, fs, new_fs)
+        new_fs = 12480#((fs - 1) // pixels_per_line + 1) * pixels_per_line
+        # y = utils.resample(y, fs, new_fs)
+        y = librosa.resample(y, fs, new_fs)
         fs = new_fs
         print("Done")
 
