@@ -2,6 +2,7 @@ from scipy.io.wavfile import read, write
 from scipy.fft import rfft, irfft
 import numpy as np
 import scipy.signal as signal
+import cv2
 
 
 def resample(y, fs_old, fs_new):
@@ -51,29 +52,44 @@ def demodulate_am(x, fc, fs):
 def get_envelope(y_filt):
     return np.abs(signal.hilbert(y_filt))
 
-def decode_apt(x_line: np.ndarray) -> np.ndarray:
-    assert x_line.shape == (2080)
-    # Define lengths
-    sync_a_length = 39
-    space_a_length = 47
-    image_a_length = 909
-    telemetry_a_length = 45
-    
-    sync_b_length = 39
-    space_b_length = 47
-    image_b_length = 909
-    telemetry_b_length = 45
+def post_process_image(image: np.ndarray) -> np.ndarray:
+    equ = cv2.equalizeHist(image)
+    return equ
 
-    # Define order
-    sync_a_idx = 0
-    space_a_idx = sync_a_idx + sync_a_length
-    image_a_idx = space_a_idx + space_a_length
-    telemetry_a_idx = image_a_idx + image_a_length
 
-    sync_b_idx = telemetry_a_idx + telemetry_a_length
-    space_b_idx = sync_b_idx + sync_b_length
-    image_b_idx = space_b_idx + space_b_length
-    telemetry_b_idx = image_b_idx + image_b_length
+# Define lengths
+sync_a_length = 39
+space_a_length = 47
+image_a_length = 909
+telemetry_a_length = 45
+
+sync_b_length = 39
+space_b_length = 47
+image_b_length = 909
+telemetry_b_length = 45
+
+# Define order
+sync_a_idx = 0
+space_a_idx = sync_a_idx + sync_a_length
+image_a_idx = space_a_idx + space_a_length
+telemetry_a_idx = image_a_idx + image_a_length
+
+sync_b_idx = telemetry_a_idx + telemetry_a_length
+space_b_idx = sync_b_idx + sync_b_length
+image_b_idx = space_b_idx + space_b_length
+telemetry_b_idx = image_b_idx + image_b_length
+
+def cut_image(image: np.ndarray):
+    return image[:, image_b_idx:image_b_idx+image_b_length]
+
+def post_process(image: np.ndarray) -> np.ndarray:
+    assert image.shape[-1] == (2080)
+
+    image = cv2.equalizeHist(image)
+    image[:, image_a_idx:image_a_idx+image_a_length] = post_process_image(image[:, image_a_idx:image_a_idx+image_a_length])
+    image[:, image_b_idx:image_b_idx+image_b_length] = post_process_image(image[:, image_b_idx:image_b_idx+image_b_length])
+    return image
+
 
 def read_wavfile(path: str):
     """

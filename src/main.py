@@ -3,13 +3,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.signal import square
 import scipy.signal as signal
-from scipy.fftpack import rfft, irfft
 import argparse
-import cv2
 import os
 import glob
-from scipy.ndimage import gaussian_filter1d
 import librosa
+import cv2
+
 
 SYNC_AB_MAX_DRIFT_PER_FRAME = 5
 START_FRAME_CC_THRESHOLD = 0.25
@@ -90,12 +89,6 @@ def find_sync_time(x, fs, samples_per_line):
     if np.max(cc_inv) > np.max(cc):
         cc = cc_inv
         add_offset = offset
-
-    # t = np.arange(0, len(cc_a)/fs, 1/fs)
-    # plt.plot(t, cc_a)
-    # plt.plot(t, cc_b)
-    # plt.plot(t, cc)
-    # plt.show()
 
     tau = np.argmax(cc)
 
@@ -184,9 +177,8 @@ def noaa_decoder(path):
 
     image = np.array(image)
     image = utils.quantize_8bit(image)
-    equ = cv2.equalizeHist(image)
 
-    return equ
+    return image
 
 def main(args):
 
@@ -197,11 +189,13 @@ def main(args):
     for entry in glob.glob(os.path.join(args.path, '*')):
         print(entry)
         decoded_image = noaa_decoder(entry)
-        # plt.imshow(decoded_image, cmap='gray', vmin=0, vmax=255)
+        decoded_image = utils.post_process(decoded_image)
+        
         path = os.path.join('output', f'{os.path.basename(entry)[:-4]}.png')
         cv2.imwrite(path, decoded_image)
         print('Image exported to: ' + path)
         print()
+        # plt.imshow(decoded_image, cmap='gray', vmin=0, vmax=255)
         plt.show()
 
 if __name__ == "__main__":
