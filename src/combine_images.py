@@ -48,10 +48,24 @@ class ImageCombiner():
     def feed(self, img1: np.ndarray) -> np.ndarray:
         print(img1.shape)
         with torch.no_grad():
+            cloud_mask = ((img1 > 200) * 255).astype(np.uint8)
+            ellipse_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, ksize=(7,7))
+            cloud_mask = cv2.dilate(cloud_mask, kernel=ellipse_kernel)
+            plt.imshow(cloud_mask, cmap='gray', vmin=0, vmax=255)
+            plt.show()
+            
             frame = frame2tensor(img1, device=device)
             if self.last_data is None:
                 self.last_data = self.matching.superpoint({'image': frame})
+                kp_int = np.round(self.last_data['keypoints'][0].cpu().numpy()).astype(np.int32)
+                mask = (cloud_mask[kp_int[:, 1], kp_int[:, 0]] == 0)
+                
                 self.last_data = {k+'0': self.last_data[k] for k in self.keys}
+                
+                self.last_data['keypoints0'][0] = self.last_data['keypoints0'][0][mask, :]
+                self.last_data['scores0'] = (self.last_data['scores0'][0][mask], )
+                self.last_data['descriptors0'][0] = self.last_data['descriptors0'][0][:, mask]
+                
                 self.last_data['image0'] = frame
             else:
                 pred = self.matching({**self.last_data, 'image1': frame})
@@ -59,10 +73,13 @@ class ImageCombiner():
                 kpts1 = pred['keypoints1'][0].cpu().numpy()
                 matches = pred['matches0'][0].cpu().numpy()
                 confidence = pred['matching_scores0'][0].cpu().numpy()
+                print(confidence.min(), confidence.max())
 
-                valid = matches > -1
+                valid = (matches > -1) & (confidence > 0.3)
                 mkpts0 = kpts0[valid]
                 mkpts1 = kpts1[matches[valid]]
+
+                mkpts1_int = np.round(mkpts1).astype(np.int32)
 
                 k_thresh = self.matching.superpoint.config['keypoint_threshold']
                 m_thresh = self.matching.superglue.config['match_threshold']
@@ -75,7 +92,7 @@ class ImageCombiner():
                     'Keypoints: {}:{}'.format(len(kpts0), len(kpts1)),
                     'Matches: {}'.format(len(mkpts0))
                 ]
-                color = cm.jet(confidence[valid])
+                color = cm.jet(confidence[valid])                
                 out = make_matching_plot_fast(
                         self.last_image, img1, kpts0, kpts1, mkpts0, mkpts1, color, text,
                         path=None, show_keypoints=True, small_text=small_text)
@@ -83,7 +100,13 @@ class ImageCombiner():
                 plt.imshow(out, cmap='gray', vmin=0, vmax=255)
                 plt.show()
 
-                homography, mask = cv2.findHomography(mkpts0, mkpts1)
+                homography, mask = cv2.findHomography(mkpts1, mkpts0)
+                # print(mkpts1.shape)
+                # pts_ = cv2.perspectiveTransform(mkpts0.reshape(-1, 1, 2), homography)
+
+                # print('MKPTS', mkpts1[:5])
+                # print('MKPTS', pts_[:5])
+
 
                 print('Before', img1.shape)
                 # homography_inverse = np.linalg.inv(homography)
@@ -96,18 +119,18 @@ class ImageCombiner():
                 plt.imshow(debug, cmap='gray', vmin=0, vmax=255)
                 plt.show()
 
-                # res = np.zeros_like(dst).astype(np.float32)
-                # mask = (dst > 0) & (self.last_image > 0)
+                res = np.zeros_like(dst).astype(np.float32)
+                mask = (dst > 0) * 1 + (self.last_image > 0) * 1
                 
-                # res[dst > 0] += dst[dst > 0]
-                # res[self.last_image > 0] += self.last_image[self.last_image  > 0]
+                res[dst > 0] += dst[dst > 0]
+                res[self.last_image > 0] += self.last_image[self.last_image  > 0]
 
-                # print('res', res.shape)
-                # print('mask', (mask>0).shape)
-                # res[mask > 0] = res[mask > 0] / mask[mask > 0]
-                # res = res.astype(np.uint8)
+                print('res', res.shape)
+                print('mask', (mask>0).shape)
+                res[mask > 0] = res[mask > 0] / mask[mask > 0]
+                res = res.astype(np.uint8)
 
-                res = ((dst.astype(np.float32) + self.last_image.astype(np.float32))/2).astype(np.uint8)
+                # res = ((dst.astype(np.float32) + self.last_image.astype(np.float32))/2).astype(np.uint8)
 
                 plt.imshow(res, cmap='gray', vmin=0, vmax=255)
                 plt.show()
