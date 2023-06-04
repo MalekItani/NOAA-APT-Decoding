@@ -69,7 +69,7 @@ class ImageCombiner():
 
         return data
 
-    def _compute_homography(self, img1: np.ndarray, img2: np.ndarray, debug: bool=False) -> np.ndarray:
+    def compute_homography(self, img1: np.ndarray, img2: np.ndarray, debug: bool=False) -> np.ndarray:
         sift = cv2.SIFT_create()
         kp1, desc1 = sift.detectAndCompute(img1, None)
         kp2, desc2 = sift.detectAndCompute(img2, None)
@@ -92,7 +92,7 @@ class ImageCombiner():
 
         return M
 
-    def compute_homography(self, img1: np.ndarray, img2: np.ndarray, debug: bool=False) -> np.ndarray:
+    def _compute_homography(self, img1: np.ndarray, img2: np.ndarray, debug: bool=False) -> np.ndarray:
         with torch.no_grad():
             # Get masked keypoints for image 1
             cloud_mask1 = get_cloud_mask(img1)
