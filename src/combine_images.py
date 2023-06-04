@@ -70,6 +70,29 @@ class ImageCombiner():
         return data
 
     def compute_homography(self, img1: np.ndarray, img2: np.ndarray, debug: bool=False) -> np.ndarray:
+        sift = cv2.SIFT_create()
+        kp1, desc1 = sift.detectAndCompute(img1, None)
+        kp2, desc2 = sift.detectAndCompute(img2, None)
+
+        FLANN_INDEX_KDTREE = 1
+        index_params = dict(algorithm = FLANN_INDEX_KDTREE, trees = 5)
+        search_params = dict(checks = 50)
+        flann = cv2.FlannBasedMatcher(index_params,search_params)
+        matches = flann.knnMatch(desc1,desc2,k=2)
+
+        good = []
+        for m,n in matches:
+            if m.distance < 0.7*n.distance:
+                good.append(m)
+
+        src_pts = np.float32([ kp1[m.queryIdx].pt for m in good ]).reshape(-1,1,2)
+        dst_pts = np.float32([ kp2[m.trainIdx].pt for m in good ]).reshape(-1,1,2)
+
+        M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC,5.0)
+
+        return M
+
+    def _compute_homography(self, img1: np.ndarray, img2: np.ndarray, debug: bool=False) -> np.ndarray:
         with torch.no_grad():
             # Get masked keypoints for image 1
             cloud_mask1 = get_cloud_mask(img1)
