@@ -18,6 +18,16 @@ matplotlib.use('TkAgg')
 
 device = 'cpu'
 
+
+def get_cloud_mask(img: np.ndarray) -> np.ndarray:
+    cloud_mask = ((img > 200) * 255).astype(np.uint8)
+    ellipse_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, ksize=(5,5))
+    cloud_mask = cv2.dilate(cloud_mask, kernel=ellipse_kernel, iterations=2)
+    
+    return cloud_mask
+
+
+
 class ImageCombiner():
     def __init__(self,
                  nms_radius = 4,
@@ -42,45 +52,50 @@ class ImageCombiner():
 
         self.keys = ['keypoints', 'scores', 'descriptors']
 
-        self.last_data = None
-        self.last_image = None
+        self.current_image = None
 
-    def feed(self, img1: np.ndarray) -> np.ndarray:
-        print(img1.shape)
+    def extract_keypoints(self, img: np.ndarray, keypoint_mask=None) -> dict:
+        frame = frame2tensor(img, device=device)
+        data = self.matching.superpoint({'image': frame})
+        data['image'] = frame
+        
+        if keypoint_mask is not None:
+            kp_int = np.round(data['keypoints'][0].cpu().numpy()).astype(np.int32)
+            mask = (keypoint_mask[kp_int[:, 1], kp_int[:, 0]] == 0)
+                        
+            data['keypoints'][0] = data['keypoints'][0][mask, :]
+            data['scores'] = (data['scores'][0][mask], )
+            data['descriptors'][0] = data['descriptors'][0][:, mask]
+
+        return data
+
+    def compute_homography(self, img1: np.ndarray, img2: np.ndarray, debug: bool=False) -> np.ndarray:
         with torch.no_grad():
-            cloud_mask = ((img1 > 200) * 255).astype(np.uint8)
-            ellipse_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, ksize=(7,7))
-            cloud_mask = cv2.dilate(cloud_mask, kernel=ellipse_kernel)
-            plt.imshow(cloud_mask, cmap='gray', vmin=0, vmax=255)
-            plt.show()
+            # Get masked keypoints for image 1
+            cloud_mask1 = get_cloud_mask(img1)
+            keypoints = self.extract_keypoints(img1, keypoint_mask=cloud_mask1)
+            keys = keypoints.keys()
+            keypoints1 = {k+'0': keypoints[k] for k in keys}
+
+            # Get masked keypoints for image 2
+            cloud_mask2 = get_cloud_mask(img2)
+            keypoints = self.extract_keypoints(img2, keypoint_mask=cloud_mask2)
+            keypoints2 = {k+'1': keypoints[k] for k in keys}
             
-            frame = frame2tensor(img1, device=device)
-            if self.last_data is None:
-                self.last_data = self.matching.superpoint({'image': frame})
-                kp_int = np.round(self.last_data['keypoints'][0].cpu().numpy()).astype(np.int32)
-                mask = (cloud_mask[kp_int[:, 1], kp_int[:, 0]] == 0)
-                
-                self.last_data = {k+'0': self.last_data[k] for k in self.keys}
-                
-                self.last_data['keypoints0'][0] = self.last_data['keypoints0'][0][mask, :]
-                self.last_data['scores0'] = (self.last_data['scores0'][0][mask], )
-                self.last_data['descriptors0'][0] = self.last_data['descriptors0'][0][:, mask]
-                
-                self.last_data['image0'] = frame
-            else:
-                pred = self.matching({**self.last_data, 'image1': frame})
-                kpts0 = self.last_data['keypoints0'][0].cpu().numpy()
-                kpts1 = pred['keypoints1'][0].cpu().numpy()
-                matches = pred['matches0'][0].cpu().numpy()
-                confidence = pred['matching_scores0'][0].cpu().numpy()
-                print(confidence.min(), confidence.max())
+            # Match keypoints using neural network
+            pred = self.matching({**keypoints1, **keypoints2})
+            kpts0 = keypoints1['keypoints0'][0].cpu().numpy()
+            kpts1 = keypoints2['keypoints1'][0].cpu().numpy()
+            matches = pred['matches0'][0].cpu().numpy()
+            confidence = pred['matching_scores0'][0].cpu().numpy()
 
-                valid = (matches > -1) & (confidence > 0.3)
-                mkpts0 = kpts0[valid]
-                mkpts1 = kpts1[matches[valid]]
+            # Get valid matches
+            valid = (matches > -1) & (confidence > 0.8)
+            mkpts0 = kpts0[valid]
+            mkpts1 = kpts1[matches[valid]]
 
-                mkpts1_int = np.round(mkpts1).astype(np.int32)
-
+            # Plot keypoints if debugging
+            if debug:
                 k_thresh = self.matching.superpoint.config['keypoint_threshold']
                 m_thresh = self.matching.superglue.config['match_threshold']
                 small_text = [
@@ -94,48 +109,58 @@ class ImageCombiner():
                 ]
                 color = cm.jet(confidence[valid])                
                 out = make_matching_plot_fast(
-                        self.last_image, img1, kpts0, kpts1, mkpts0, mkpts1, color, text,
+                        img1, img2, kpts0, kpts1, mkpts0, mkpts1, color, text,
                         path=None, show_keypoints=True, small_text=small_text)
-                
                 plt.imshow(out, cmap='gray', vmin=0, vmax=255)
+                plt.title('Keypoints')
                 plt.show()
 
-                homography, mask = cv2.findHomography(mkpts1, mkpts0)
-                # print(mkpts1.shape)
-                # pts_ = cv2.perspectiveTransform(mkpts0.reshape(-1, 1, 2), homography)
+            homography, mask = cv2.findHomography(mkpts1, mkpts0)
 
-                # print('MKPTS', mkpts1[:5])
-                # print('MKPTS', pts_[:5])
+            return homography
 
+    def feed(self, img: np.ndarray, debug=False) -> np.ndarray:
+        A = self.current_image
+        B = img
+        
+        if A is None:
+            self.current_image = img
+        else:
+            # Compute homography between two images
+            homography = self.compute_homography(A, img, debug=debug)
 
-                print('Before', img1.shape)
-                # homography_inverse = np.linalg.inv(homography)
-                dst = cv2.warpPerspective(img1, homography, self.last_image.T.shape)
+            # Warp input image to current image
+            dst = cv2.warpPerspective(img, homography, A.T.shape)
 
-                print('Warped', dst.shape)
-                print('Last image', self.last_image.shape)
-
-                debug = np.concatenate([self.last_image, dst], axis=1)
-                plt.imshow(debug, cmap='gray', vmin=0, vmax=255)
-                plt.show()
-
-                res = np.zeros_like(dst).astype(np.float32)
-                mask = (dst > 0) * 1 + (self.last_image > 0) * 1
+            if debug:
+                debug_img = np.concatenate([A, dst], axis=1)
                 
-                res[dst > 0] += dst[dst > 0]
-                res[self.last_image > 0] += self.last_image[self.last_image  > 0]
-
-                print('res', res.shape)
-                print('mask', (mask>0).shape)
-                res[mask > 0] = res[mask > 0] / mask[mask > 0]
-                res = res.astype(np.uint8)
-
-                # res = ((dst.astype(np.float32) + self.last_image.astype(np.float32))/2).astype(np.uint8)
-
-                plt.imshow(res, cmap='gray', vmin=0, vmax=255)
+                plt.imshow(debug_img, cmap='gray', vmin=0, vmax=255)
                 plt.show()
 
-            self.last_image = img1
+            # Add images (where non-zero)
+            res = np.zeros_like(dst).astype(np.float32)
+            mask = (dst > 0) * 1 + (A > 0) * 1
+            res[dst > 0] += dst[dst > 0]
+            res[A > 0] += A[A  > 0]
+            res[mask > 0] = res[mask > 0] / mask[mask > 0]
+            res = res.astype(np.uint8)
+            
+            # Update current image
+            self.current_image = res
+
+    def draw_borders(self, ref_img: np.ndarray, border_mask: np.ndarray, debug: bool=False):
+        homography = self.compute_homography(self.current_image, ref_img, debug=debug)
+
+        # Warp input image to current image
+        warped_borders = cv2.warpPerspective(border_mask, homography, self.current_image.T.shape)
+        
+        # Apply borders on top of current image
+        self.current_image = (warped_borders > 0) * warped_borders + (warped_borders == 0) * self.current_image
+
+    def get(self):
+        return self.current_image
+
 
 def main(args):
     imgs = []
@@ -143,15 +168,27 @@ def main(args):
         img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
         imgs.append(utils.cut_image(img))
 
+    reference_img = cv2.flip(cv2.imread(args.noaa_reference_path, cv2.IMREAD_GRAYSCALE), -1)
+    reference_img_no_borders = cv2.flip(cv2.imread(args.noaa_reference_path[:-4] + '_no_borders.png', cv2.IMREAD_GRAYSCALE), -1)
+    border_mask = ((reference_img >= 252) * 255).astype(np.uint8)
+    
     combiner = ImageCombiner()
 
     img = None
     for i in range(len(imgs)):
-        img = combiner.feed(imgs[i])
+        combiner.feed(imgs[i], debug=0)
+
+    combiner.draw_borders(reference_img_no_borders, border_mask, 1)
+
+    img = combiner.get()
+    img = cv2.flip(img, -1) # Undo rotations
+    plt.imshow(img, cmap='gray', vmin=0, vmax=255)
+    plt.show()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("path")
+    parser.add_argument("noaa_reference_path")
     args = parser.parse_args()
     main(args)
