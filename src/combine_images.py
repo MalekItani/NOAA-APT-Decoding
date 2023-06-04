@@ -26,12 +26,19 @@ def get_cloud_mask(img: np.ndarray) -> np.ndarray:
     
     return cloud_mask
 
+def find_ocean(img: np.ndarray):
+    hsv_img = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    ocean_mask = (((hsv_img[..., 0] >= 95) & (hsv_img[..., 0] <= 120) & (hsv_img[..., 2] <= 70))).astype(np.uint8)
+    ocean_mask = cv2.medianBlur(ocean_mask, ksize=5)
+    ellipse_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, ksize=(5,5))
+    ocean_mask = cv2.morphologyEx((ocean_mask * 255).astype(np.uint8), cv2.MORPH_DILATE, kernel=ellipse_kernel, iterations=6)
 
+    return ocean_mask
 
 class ImageCombiner():
     def __init__(self,
                  nms_radius = 4,
-                 keypoint_threshold = 0.005,
+                 keypoint_threshold = 0.001,
                  max_keypoints = -1,
                  superglue = 'outdoor',
                  sinkhorn_iterations = 20,
@@ -53,6 +60,9 @@ class ImageCombiner():
         self.keys = ['keypoints', 'scores', 'descriptors']
 
         self.current_image = None
+        self.ref_img = None
+        self.borders = None
+        self.coastlines = None
 
     def extract_keypoints(self, img: np.ndarray, keypoint_mask=None) -> dict:
         frame = frame2tensor(img, device=device)
@@ -69,7 +79,7 @@ class ImageCombiner():
 
         return data
 
-    def compute_homography(self, img1: np.ndarray, img2: np.ndarray, debug: bool=False) -> np.ndarray:
+    def _compute_homography(self, img1: np.ndarray, img2: np.ndarray, debug: bool=False) -> np.ndarray:
         sift = cv2.SIFT_create()
         kp1, desc1 = sift.detectAndCompute(img1, None)
         kp2, desc2 = sift.detectAndCompute(img2, None)
@@ -92,7 +102,7 @@ class ImageCombiner():
 
         return M
 
-    def _compute_homography(self, img1: np.ndarray, img2: np.ndarray, debug: bool=False) -> np.ndarray:
+    def compute_homography(self, img1: np.ndarray, img2: np.ndarray, debug: bool=False, conf=0.8) -> np.ndarray:
         with torch.no_grad():
             # Get masked keypoints for image 1
             cloud_mask1 = get_cloud_mask(img1)
@@ -113,7 +123,7 @@ class ImageCombiner():
             confidence = pred['matching_scores0'][0].cpu().numpy()
 
             # Get valid matches
-            valid = (matches > -1) & (confidence > 0.8)
+            valid = (matches > -1) & (confidence > conf)
             mkpts0 = kpts0[valid]
             mkpts1 = kpts1[matches[valid]]
 
@@ -172,17 +182,52 @@ class ImageCombiner():
             # Update current image
             self.current_image = res
 
-    def draw_borders(self, ref_img: np.ndarray, border_mask: np.ndarray, debug: bool=False):
+    def add_borders(self, ref_img: np.ndarray, border_mask: np.ndarray, debug: bool=False):
+        self.ref_img = ref_img
+
         homography = self.compute_homography(self.current_image, ref_img, debug=debug)
 
         # Warp input image to current image
-        warped_borders = cv2.warpPerspective(border_mask, homography, self.current_image.T.shape)
-        
-        # Apply borders on top of current image
-        self.current_image = (warped_borders > 0) * warped_borders + (warped_borders == 0) * self.current_image
+        self.borders = cv2.warpPerspective(border_mask, homography, self.current_image.T.shape)
 
-    def get(self):
-        return self.current_image
+    def add_coastline(self, ref_w_borders: np.ndarray, ref_wo_borders: np.ndarray, debug: bool = False):
+        ref_w_borders_gray = cv2.cvtColor(ref_w_borders, cv2.COLOR_BGR2GRAY)
+        border_mask = ((ref_w_borders_gray >= 252) * 255).astype(np.uint8)
+        
+        
+        homography = self.compute_homography(self.borders/5, border_mask/5, debug=debug)
+
+        # Add new borders
+        warped_borders = cv2.warpPerspective(border_mask, homography, self.borders.T.shape)
+
+        if debug:
+            debug_img = np.concatenate([warped_borders, self.borders], axis=1)
+            
+            plt.imshow(debug_img, cmap='gray', vmin=0, vmax=255)
+            plt.show()
+
+        self.borders = np.maximum(self.borders, warped_borders)
+        
+        # Get oceans
+        ocean_mask = find_ocean(ref_wo_borders)
+
+        # Add new coaslines
+        ocean_mask_warped = cv2.warpPerspective(ocean_mask, homography, self.borders.T.shape)
+
+        if self.coastlines is None:
+            self.coastlines = (ocean_mask_warped * self.borders)
+        else:
+            self.coastlines = np.maximum(self.coastlines, (ocean_mask_warped * self.borders))
+
+        if debug:            
+            plt.imshow(ocean_mask_warped, cmap='gray', vmin=0, vmax=255)
+            plt.show()
+
+    def get(self, coastlines = True):
+        ret = self.current_image
+        if coastlines:
+            ret = (self.coastlines > 0) * 255 + (self.coastlines == 0) * self.current_image
+        return ret
 
 
 def main(args):
@@ -191,9 +236,11 @@ def main(args):
         img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
         imgs.append(utils.cut_image(img))
 
-    reference_img = cv2.flip(cv2.imread(args.noaa_reference_path, cv2.IMREAD_GRAYSCALE), -1)
-    reference_img_no_borders = cv2.flip(cv2.imread(args.noaa_reference_path[:-4] + '_no_borders.png', cv2.IMREAD_GRAYSCALE), -1)
-    border_mask = ((reference_img >= 252) * 255).astype(np.uint8)
+    reference_img = cv2.flip(cv2.imread(args.noaa_reference_path, cv2.IMREAD_COLOR), -1)
+    reference_img_no_borders = cv2.flip(cv2.imread(args.noaa_reference_path[:-4] + '_no_borders.png', cv2.IMREAD_COLOR), -1)
+    
+    reference_img_gray = cv2.cvtColor(reference_img, cv2.COLOR_BGR2GRAY)
+    reference_img_no_borders_gray = cv2.cvtColor(reference_img_no_borders, cv2.COLOR_BGR2GRAY)
     
     combiner = ImageCombiner()
 
@@ -201,9 +248,18 @@ def main(args):
     for i in range(len(imgs)):
         combiner.feed(imgs[i], debug=0)
 
-    combiner.draw_borders(reference_img_no_borders, border_mask, 1)
+    border_mask = ((reference_img_gray >= 252) * 255).astype(np.uint8)
+    combiner.add_borders(reference_img_no_borders_gray, border_mask, 1)
 
-    img = combiner.get()
+    for img_path in glob.glob(os.path.join(args.noaa_coastlines, '*_borders.png')):
+        print(img_path)
+        wborders = cv2.flip(cv2.imread(img_path[:-len('_no_borders.png')] + '.png', cv2.IMREAD_COLOR), -1)
+        woborders = cv2.flip(cv2.imread(img_path, cv2.IMREAD_COLOR), -1)
+
+        combiner.add_coastline(wborders, woborders, 1)
+
+
+    img = combiner.get(coastlines=True)
     img = cv2.flip(img, -1) # Undo rotations
     plt.imshow(img, cmap='gray', vmin=0, vmax=255)
     plt.show()
@@ -213,5 +269,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("path")
     parser.add_argument("noaa_reference_path")
+    parser.add_argument("noaa_coastlines")
     args = parser.parse_args()
     main(args)
