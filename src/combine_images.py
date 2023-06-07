@@ -98,20 +98,24 @@ class ImageCombiner():
         src_pts = np.float32([ kp1[m.queryIdx].pt for m in good ]).reshape(-1,1,2)
         dst_pts = np.float32([ kp2[m.trainIdx].pt for m in good ]).reshape(-1,1,2)
 
-        M, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC,5.0)
+        M, mask = cv2.findHomography(src_pts, dst_pts)
 
         return M
 
-    def compute_homography(self, img1: np.ndarray, img2: np.ndarray, debug: bool=False, conf=0.8) -> np.ndarray:
+    def compute_homography(self, img1: np.ndarray, img2: np.ndarray, debug: bool=False, conf=0.8, blur_images=False, clouds=True) -> np.ndarray:
         with torch.no_grad():
             # Get masked keypoints for image 1
-            cloud_mask1 = get_cloud_mask(img1)
+            cloud_mask1 = get_cloud_mask(img1) * clouds
+            if blur_images:
+                img1 = cv2.medianBlur(img1, 3)
             keypoints = self.extract_keypoints(img1, keypoint_mask=cloud_mask1)
             keys = keypoints.keys()
             keypoints1 = {k+'0': keypoints[k] for k in keys}
 
             # Get masked keypoints for image 2
-            cloud_mask2 = get_cloud_mask(img2)
+            cloud_mask2 = get_cloud_mask(img2) * clouds
+            if blur_images:
+                img2 = cv2.medianBlur(img2, 3)
             keypoints = self.extract_keypoints(img2, keypoint_mask=cloud_mask2)
             keypoints2 = {k+'1': keypoints[k] for k in keys}
             
@@ -148,6 +152,10 @@ class ImageCombiner():
                 plt.title('Keypoints')
                 plt.show()
 
+            if len(mkpts1) < 4:
+                print("Couldn't find homography, skipping...")
+                return None
+
             homography, mask = cv2.findHomography(mkpts1, mkpts0)
 
             return homography
@@ -160,7 +168,10 @@ class ImageCombiner():
             self.current_image = img
         else:
             # Compute homography between two images
-            homography = self.compute_homography(A, img, debug=debug)
+            homography = self.compute_homography(A, img, debug=debug, blur_images=0)
+
+            if homography is None:
+                return
 
             # Warp input image to current image
             dst = cv2.warpPerspective(img, homography, A.T.shape)
@@ -186,16 +197,24 @@ class ImageCombiner():
         self.ref_img = ref_img
 
         homography = self.compute_homography(self.current_image, ref_img, debug=debug)
+        if homography is None:
+            return
 
         # Warp input image to current image
         self.borders = cv2.warpPerspective(border_mask, homography, self.current_image.T.shape)
 
     def add_coastline(self, ref_w_borders: np.ndarray, ref_wo_borders: np.ndarray, debug: bool = False):
+        if self.borders is None:
+            print("No borders found, cannot add coastline!")
+            return
+        
         ref_w_borders_gray = cv2.cvtColor(ref_w_borders, cv2.COLOR_BGR2GRAY)
         border_mask = ((ref_w_borders_gray >= 252) * 255).astype(np.uint8)
         
         
-        homography = self.compute_homography(self.borders/5, border_mask/5, debug=debug)
+        homography = self.compute_homography(self.borders/5, border_mask/5, debug=debug, clouds=False)
+        if homography is None:
+            return
 
         # Add new borders
         warped_borders = cv2.warpPerspective(border_mask, homography, self.borders.T.shape)
@@ -236,6 +255,8 @@ def main(args):
         img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
         imgs.append(utils.cut_image(img))
 
+    imgs = sorted(imgs, key = lambda x: -x.shape[0]) # Sort images by decreasing height
+
     reference_img = cv2.flip(cv2.imread(args.noaa_reference_path, cv2.IMREAD_COLOR), -1)
     reference_img_no_borders = cv2.flip(cv2.imread(args.noaa_reference_path[:-4] + '_no_borders.png', cv2.IMREAD_COLOR), -1)
     
@@ -246,17 +267,27 @@ def main(args):
 
     img = None
     for i in range(len(imgs)):
-        combiner.feed(imgs[i], debug=0)
+        combiner.feed(imgs[i], debug=1)
+
+    # img = combiner.get(coastlines=False)
+    # img = cv2.blur(img, ksize=(1, 3))
+    # plt.imshow(img, cmap='gray', vmin=0, vmax=255)
+    # plt.show()
+    # edges = cv2.Canny(img,100,255)
+    # ellipse_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, ksize=(5,5))
+    # edges = cv2.dilate(edges, kernel=ellipse_kernel)
+    # plt.imshow(edges, cmap='gray', vmin=0, vmax=255)
+    # plt.show()
 
     border_mask = ((reference_img_gray >= 252) * 255).astype(np.uint8)
-    combiner.add_borders(reference_img_no_borders_gray, border_mask, 1)
+    combiner.add_borders(reference_img_no_borders_gray, border_mask, 0)
 
     for img_path in glob.glob(os.path.join(args.noaa_coastlines, '*_borders.png')):
         print(img_path)
         wborders = cv2.flip(cv2.imread(img_path[:-len('_no_borders.png')] + '.png', cv2.IMREAD_COLOR), -1)
         woborders = cv2.flip(cv2.imread(img_path, cv2.IMREAD_COLOR), -1)
 
-        combiner.add_coastline(wborders, woborders, 1)
+        combiner.add_coastline(wborders, woborders, 0)
 
 
     img = combiner.get(coastlines=True)
