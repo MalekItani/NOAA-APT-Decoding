@@ -300,7 +300,7 @@ class ImageCombiner():
                 noisy_img = cv2.flip(noisy_img, -1) # Undo rotations
                 axes[i].imshow(noisy_img, cmap='gray', vmin=0, vmax=255)
             
-            axes[i].set_title(f'Noise level: {snr}dB')
+            axes[i].set_title(f'SNR level: {snr}dB')
             label = chr(ord('A') + i)
             axes[i].set_xlabel(f'({label})')
         
