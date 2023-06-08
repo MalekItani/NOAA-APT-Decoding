@@ -28,10 +28,12 @@ def get_cloud_mask(img: np.ndarray) -> np.ndarray:
 
 def find_ocean(img: np.ndarray):
     hsv_img = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    ocean_mask = (((hsv_img[..., 0] >= 95) & (hsv_img[..., 0] <= 120) & (hsv_img[..., 2] <= 70))).astype(np.uint8)
+    ocean_mask = (((hsv_img[..., 0] >= 95) & (hsv_img[..., 0] <= 120) & (hsv_img[..., 2] <= 70))).astype(np.uint8)    
+    
     ocean_mask = cv2.medianBlur(ocean_mask, ksize=5)
     ellipse_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, ksize=(5,5))
-    ocean_mask = cv2.morphologyEx((ocean_mask * 255).astype(np.uint8), cv2.MORPH_DILATE, kernel=ellipse_kernel, iterations=6)
+    ocean_mask = cv2.morphologyEx((ocean_mask * 255).astype(np.uint8), cv2.MORPH_OPEN, kernel=ellipse_kernel, iterations=1)
+    ocean_mask = cv2.morphologyEx((ocean_mask * 255).astype(np.uint8), cv2.MORPH_DILATE, kernel=ellipse_kernel, iterations=11)
 
     return ocean_mask
 
@@ -280,7 +282,7 @@ def main(args):
     # plt.show()
 
     border_mask = ((reference_img_gray >= 252) * 255).astype(np.uint8)
-    combiner.add_borders(reference_img_no_borders_gray, border_mask, 0)
+    combiner.add_borders(reference_img_no_borders_gray, border_mask, 1)
 
     for img_path in glob.glob(os.path.join(args.noaa_coastlines, '*_borders.png')):
         print(img_path)
