@@ -1,12 +1,9 @@
 import utils
 import matplotlib.pyplot as plt
 import numpy as np
-from scipy.signal import square
-import scipy.signal as signal
 import argparse
 import os
 import glob
-import librosa
 import cv2
 from SuperGluePretrainedNetwork.models.matching import Matching
 from SuperGluePretrainedNetwork.models.utils import frame2tensor, make_matching_plot_fast
