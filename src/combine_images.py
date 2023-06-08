@@ -37,6 +37,7 @@ def find_ocean(img: np.ndarray):
 
     return ocean_mask
 
+
 class ImageCombiner():
     def __init__(self,
                  nms_radius = 4,
@@ -65,6 +66,8 @@ class ImageCombiner():
         self.ref_img = None
         self.borders = None
         self.coastlines = None
+        self.imgs = []
+        self.warped_imgs = []
 
     def extract_keypoints(self, img: np.ndarray, keypoint_mask=None) -> dict:
         frame = frame2tensor(img, device=device)
@@ -164,10 +167,12 @@ class ImageCombiner():
 
     def feed(self, img: np.ndarray, debug=False) -> np.ndarray:
         A = self.current_image
-        B = img
+
+        self.imgs.append(img)
         
         if A is None:
             self.current_image = img
+            self.warped_imgs.append(img)
         else:
             # Compute homography between two images
             homography = self.compute_homography(A, img, debug=debug, blur_images=0)
@@ -184,119 +189,202 @@ class ImageCombiner():
                 plt.imshow(debug_img, cmap='gray', vmin=0, vmax=255)
                 plt.show()
 
-            # Add images (where non-zero)
-            res = np.zeros_like(dst).astype(np.float32)
-            mask = (dst > 0) * 1 + (A > 0) * 1
-            res[dst > 0] += dst[dst > 0]
-            res[A > 0] += A[A  > 0]
-            res[mask > 0] = res[mask > 0] / mask[mask > 0]
-            res = res.astype(np.uint8)
-            
-            # Update current image
-            self.current_image = res
+            self.warped_imgs.append(dst)
 
-    def add_borders(self, ref_img: np.ndarray, border_mask: np.ndarray, debug: bool=False):
-        self.ref_img = ref_img
+            self.current_image = self.get()
 
-        homography = self.compute_homography(self.current_image, ref_img, debug=debug)
+    def get(self):
+        # Add images (where non-zero)
+        res = np.zeros_like(self.warped_imgs[0]).astype(np.float32)
+        
+        denom_mask = np.zeros_like(res)
+        for img in self.warped_imgs:
+            res += img
+            denom_mask += img > 0
+        
+        res[denom_mask > 0] = res[denom_mask > 0] / denom_mask[denom_mask > 0]
+        res = res.astype(np.uint8)
+
+        return res
+
+    def draw_coastlines(self,
+                        img: np.ndarray,
+                        ref_img_gray: np.ndarray,
+                        ref_img_gray_no_borders: np.ndarray,
+                        coastline_imgs: list,
+                        debug: bool = False) -> np.ndarray:
+        
+        border_mask = ((ref_img_gray >= 252) * 255).astype(np.uint8)
+        
+        # Add borders
+        homography = self.compute_homography(img, ref_img_gray_no_borders, debug=debug)
         if homography is None:
             return
 
         # Warp input image to current image
-        self.borders = cv2.warpPerspective(border_mask, homography, self.current_image.T.shape)
+        borders = cv2.warpPerspective(border_mask, homography, img.T.shape)
 
-    def add_coastline(self, ref_w_borders: np.ndarray, ref_wo_borders: np.ndarray, debug: bool = False):
-        if self.borders is None:
-            print("No borders found, cannot add coastline!")
-            return
-        
-        ref_w_borders_gray = cv2.cvtColor(ref_w_borders, cv2.COLOR_BGR2GRAY)
-        border_mask = ((ref_w_borders_gray >= 252) * 255).astype(np.uint8)
-        
-        
-        homography = self.compute_homography(self.borders/5, border_mask/5, debug=debug, clouds=False)
-        if homography is None:
-            return
-
-        # Add new borders
-        warped_borders = cv2.warpPerspective(border_mask, homography, self.borders.T.shape)
-
-        if debug:
-            debug_img = np.concatenate([warped_borders, self.borders], axis=1)
+        coastlines = None
+        for wborders, woborders in coastline_imgs:
+            # Add coastline
+            if borders is None:
+                print("No borders found, cannot add coastline!")
+                return
             
-            plt.imshow(debug_img, cmap='gray', vmin=0, vmax=255)
-            plt.show()
+            ref_w_borders_gray = cv2.cvtColor(wborders, cv2.COLOR_BGR2GRAY)
+            border_mask = ((ref_w_borders_gray >= 252) * 255).astype(np.uint8)
+            
+            
+            homography = self.compute_homography(borders//5, border_mask//5, debug=debug, clouds=False)
+            if homography is None:
+                return
 
-        self.borders = np.maximum(self.borders, warped_borders)
+            # Add new borders
+            warped_borders = cv2.warpPerspective(border_mask, homography, borders.T.shape)
+
+            if debug:
+                debug_img = np.concatenate([warped_borders, borders], axis=1)
+                
+                plt.imshow(debug_img, cmap='gray', vmin=0, vmax=255)
+                plt.show()
+
+            borders = np.maximum(borders, warped_borders)
+            
+            # Get oceans
+            ocean_mask = find_ocean(woborders)
+
+            # Add new coaslines
+            ocean_mask_warped = cv2.warpPerspective(ocean_mask, homography, borders.T.shape)
+
+            if coastlines is None:
+               coastlines = (ocean_mask_warped * borders)
+            else:
+                coastlines = np.maximum(coastlines, (ocean_mask_warped * borders))
+
+            if debug:            
+                plt.imshow(ocean_mask_warped, cmap='gray', vmin=0, vmax=255)
+                plt.show()
         
-        # Get oceans
-        ocean_mask = find_ocean(ref_wo_borders)
+        # Add coastlines
+        ret = ((coastlines > 0) * 255 + (coastlines == 0) * img).astype(np.uint8)
 
-        # Add new coaslines
-        ocean_mask_warped = cv2.warpPerspective(ocean_mask, homography, self.borders.T.shape)
-
-        if self.coastlines is None:
-            self.coastlines = (ocean_mask_warped * self.borders)
-        else:
-            self.coastlines = np.maximum(self.coastlines, (ocean_mask_warped * self.borders))
-
-        if debug:            
-            plt.imshow(ocean_mask_warped, cmap='gray', vmin=0, vmax=255)
-            plt.show()
-
-    def get(self, coastlines = True):
-        ret = self.current_image
-        if coastlines:
-            ret = (self.coastlines > 0) * 255 + (self.coastlines == 0) * self.current_image
         return ret
+    
+    def plot_noise_resilience(self,
+                              img: np.ndarray,
+                              ref_img_gray: np.ndarray,
+                              ref_img_gray_no_borders: np.ndarray,
+                              coastline_imgs: list,
+                              debug: bool = False, 
+                              title: str = 'unknown'):
+        
+        SNRs = [20, 10, 5, 0]
+        img_0to1 = img/255
+        img_power = 10*np.log10(np.var(img_0to1))
 
+        fig, axes = plt.subplots(nrows=1, ncols=len(SNRs))
+        fig.set_size_inches(16, 4)
+        for i, snr in enumerate(SNRs):
+            noise_power = 10**((img_power-snr)/20)
+            n0 = np.random.randn(*img.shape)*noise_power
+            
+            # Add noise
+            noisy_img = np.round(np.clip(img_0to1 + n0, 0, 1) * 255).astype(np.uint8)
+            measured_noise_power = 10*np.log10(np.var(n0))
+            realized_snr = img_power - measured_noise_power
+            print(f"Realized {realized_snr}, expected {snr}")
 
-def main(args):
+            coastline_img = self.draw_coastlines(noisy_img, ref_img_gray, ref_img_gray_no_borders, coastline_imgs, debug=debug)
+            
+            if coastline_img is not None:
+                coastline_img = cv2.flip(coastline_img, -1) # Undo rotations
+                axes[i].imshow(coastline_img, cmap='gray', vmin=0, vmax=255)
+            else:
+                noisy_img = cv2.flip(noisy_img, -1) # Undo rotations
+                axes[i].imshow(noisy_img, cmap='gray', vmin=0, vmax=255)
+            
+            axes[i].set_title(f'Noise level: {snr}dB')
+            label = chr(ord('A') + i)
+            axes[i].set_xlabel(f'({label})')
+        
+        fig.suptitle(title.capitalize())
+        plt.savefig(f'output/Project2/All/{title}_resilience.png')
+        plt.clf()
+        plt.close(fig)
+        
+
+def combine_and_draw_coastlines(args):
     imgs = []
     for img_path in glob.glob(os.path.join(args.path, '*.png')):
         img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
-        imgs.append(utils.cut_image(img))
+        title = os.path.basename(img_path)[:-4]
+        imgs.append((utils.cut_image(img), title))
 
-    imgs = sorted(imgs, key = lambda x: -x.shape[0]) # Sort images by decreasing height
+    imgs = sorted(imgs, key = lambda x: -x[0].shape[0]) # Sort images by decreasing height
+    titles = [x[1] for x in imgs]
+    imgs = [x[0] for x in imgs]
 
     reference_img = cv2.flip(cv2.imread(args.noaa_reference_path, cv2.IMREAD_COLOR), -1)
     reference_img_no_borders = cv2.flip(cv2.imread(args.noaa_reference_path[:-4] + '_no_borders.png', cv2.IMREAD_COLOR), -1)
     
     reference_img_gray = cv2.cvtColor(reference_img, cv2.COLOR_BGR2GRAY)
     reference_img_no_borders_gray = cv2.cvtColor(reference_img_no_borders, cv2.COLOR_BGR2GRAY)
-    
+
     combiner = ImageCombiner()
 
-    img = None
-    for i in range(len(imgs)):
-        combiner.feed(imgs[i], debug=1)
-
-    # img = combiner.get(coastlines=False)
-    # img = cv2.blur(img, ksize=(1, 3))
-    # plt.imshow(img, cmap='gray', vmin=0, vmax=255)
-    # plt.show()
-    # edges = cv2.Canny(img,100,255)
-    # ellipse_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, ksize=(5,5))
-    # edges = cv2.dilate(edges, kernel=ellipse_kernel)
-    # plt.imshow(edges, cmap='gray', vmin=0, vmax=255)
-    # plt.show()
-
-    border_mask = ((reference_img_gray >= 252) * 255).astype(np.uint8)
-    combiner.add_borders(reference_img_no_borders_gray, border_mask, 1)
-
+    coastline_imgs = []
     for img_path in glob.glob(os.path.join(args.noaa_coastlines, '*_borders.png')):
         print(img_path)
         wborders = cv2.flip(cv2.imread(img_path[:-len('_no_borders.png')] + '.png', cv2.IMREAD_COLOR), -1)
         woborders = cv2.flip(cv2.imread(img_path, cv2.IMREAD_COLOR), -1)
+        coastline_imgs.append((wborders, woborders))
 
-        combiner.add_coastline(wborders, woborders, 0)
+    img = None
+    quadrahelix_plotted = dipole_plotted = False
+    for i in range(len(imgs)):
+        print("Now processing", titles[i])
+        combiner.feed(imgs[i], debug=0)
+        ret = combiner.draw_coastlines(imgs[i], reference_img_gray, reference_img_no_borders_gray, coastline_imgs)
+        
+        if ret is not None:
+            ret = cv2.flip(ret, -1) # Undo rotations
+            
+            if 'quadra' in titles[i] and (not quadrahelix_plotted):
+                quadrahelix_plotted = True
+                
+                combiner.plot_noise_resilience(imgs[i], 
+                                               reference_img_gray,
+                                               reference_img_no_borders_gray,
+                                               coastline_imgs,
+                                               title=titles[i] + " noise resilience")
 
+            if 'dipole' in titles[i] and (not dipole_plotted):
+                dipole_plotted = True
+                
+                combiner.plot_noise_resilience(imgs[i], 
+                                               reference_img_gray,
+                                               reference_img_no_borders_gray,
+                                               coastline_imgs,
+                                               title=titles[i] + " noise resilience")
+        else:
+            ret = imgs[i]
+        
+        plt.imshow(ret, cmap='gray', vmin=0, vmax=255)
+        plt.title(titles[i].capitalize())
+        plt.savefig(f'output/Project2/All/{titles[i]}.png')
+        plt.close()
 
-    img = combiner.get(coastlines=True)
+    img = combiner.get()
+
+    img = combiner.draw_coastlines(img, reference_img_gray, reference_img_no_borders_gray, coastline_imgs)
+
+    combiner.plot_noise_resilience(img, reference_img_gray, reference_img_no_borders_gray, coastline_imgs, title='combined')
+
     img = cv2.flip(img, -1) # Undo rotations
     plt.imshow(img, cmap='gray', vmin=0, vmax=255)
-    plt.show()
-
+    plt.title("Coherently combined")
+    plt.savefig(f'output/Project2/All/sum_combined.png')
+    plt.close()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -304,4 +392,4 @@ if __name__ == "__main__":
     parser.add_argument("noaa_reference_path")
     parser.add_argument("noaa_coastlines")
     args = parser.parse_args()
-    main(args)
+    combine_and_draw_coastlines(args)
